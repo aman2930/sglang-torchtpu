@@ -71,18 +71,33 @@ class CsaGatherTest(parameterized.TestCase):
         )
         return nope_cache, rope_cache, nope_bytes, rope_bytes
 
-    def _check(self, nope_cache, rope_cache, nope_bytes, rope_bytes, indices):
+    def _check(
+        self, nope_cache, rope_cache, nope_bytes, rope_bytes, indices, num_valid=None
+    ):
         nope_out, rope_out = dsa_gather.dsa_gather(
-            nope_cache, rope_cache, jnp.asarray(indices)
+            nope_cache,
+            rope_cache,
+            jnp.asarray(indices),
+            num_valid_indices=None if num_valid is None else jnp.int32(num_valid),
+        )
+        n = len(indices)
+        # Always exactly N rows, whether the kernel wrote them in place or
+        # sliced block-padded outputs.
+        self.assertEqual(nope_out.shape[0], n)
+        self.assertEqual(rope_out.shape[0], n)
+        # Rows past num_valid_indices are not written (callers mask them).
+        live = n if num_valid is None else num_valid
+        np.testing.assert_array_equal(
+            np.asarray(nope_out).reshape(n, -1)[:live], nope_bytes[indices[:live]]
         )
         np.testing.assert_array_equal(
-            np.asarray(nope_out).reshape(len(indices), -1), nope_bytes[indices]
+            np.asarray(rope_out)[:live], rope_bytes[indices[:live]]
         )
-        np.testing.assert_array_equal(np.asarray(rope_out), rope_bytes[indices])
 
     @parameterized.named_parameters(
-        # Odd count exercises the internal padding to the SC block size;
-        # sampling with replacement exercises duplicate indices.
+        # Counts that are not a multiple of a pipeline step (64 rows) take the
+        # block-padded path and its slice; sampling with replacement exercises
+        # duplicate indices.
         dict(testcase_name="random_with_duplicates", pages=8, n=1000),
         dict(testcase_name="small_odd", pages=2, n=17),
         dict(testcase_name="large", pages=16, n=8192),
@@ -91,6 +106,33 @@ class CsaGatherTest(parameterized.TestCase):
         nope_cache, rope_cache, nope_bytes, rope_bytes = self._make_caches(pages)
         indices = self.rng.integers(0, pages * PAGE_SIZE, n).astype(np.int32)
         self._check(nope_cache, rope_cache, nope_bytes, rope_bytes, indices)
+
+    @parameterized.named_parameters(
+        # N a multiple of a pipeline step (64 rows) but not of the block: the
+        # kernel writes exactly N rows and stops mid-block. These are sparse
+        # MLA decode chunks of 1, 16 and 64 tokens at 2176-wide top-k rows.
+        dict(testcase_name="decode_1_token", n=2176),
+        dict(testcase_name="decode_16_tokens", n=16 * 2176),
+        dict(testcase_name="decode_64_tokens", n=64 * 2176),
+        # A single step past the last full block.
+        dict(testcase_name="one_step_past_block", n=16384 + 64),
+    )
+    def test_partial_last_block(self, n):
+        pages = 16
+        nope_cache, rope_cache, nope_bytes, rope_bytes = self._make_caches(pages)
+        indices = self.rng.integers(0, pages * PAGE_SIZE, n).astype(np.int32)
+        self._check(nope_cache, rope_cache, nope_bytes, rope_bytes, indices)
+
+    def test_partial_last_block_with_fewer_live_rows(self):
+        # A padded decode batch: only the first 5 of 16 tokens' rows are live,
+        # so most subcores skip; the live rows still land exactly.
+        pages = 16
+        nope_cache, rope_cache, nope_bytes, rope_bytes = self._make_caches(pages)
+        n = 16 * 2176
+        indices = self.rng.integers(0, pages * PAGE_SIZE, n).astype(np.int32)
+        self._check(
+            nope_cache, rope_cache, nope_bytes, rope_bytes, indices, num_valid=5 * 2176
+        )
 
     def test_all_byte_lanes(self):
         """Every position of every page: covers all four rope byte lanes and
