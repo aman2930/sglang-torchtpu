@@ -1987,6 +1987,10 @@ class Envs:
     # TPU slice by assigning half the chips to prefill and half to decode.
     # This is intended primarily for development and is not for production use.
     SGLANG_TPU_PD_COLOCATED = EnvBool(False)
+    # DeepSeek-V4.1 ratio-1/2 index-K page, in records (dsv41_index_page_size).
+    # 128 is the packed FP8 scorer's native page; 64 was the previous default.
+    # Prefill and decode peers of a PD deployment must use the same value.
+    SGLANG_TPU_DSV41_INDEX_PAGE_SIZE = EnvInt(128)
 
     # Qwen3.5 and GDN
     SGLANG_ENABLE_GDN_DECODE_FUSED_PROJ_CONV = EnvBool(True)

@@ -486,6 +486,20 @@ class HiSparseC4DevicePool(DeepSeekV4SingleKVPool):
 # Low-ratio indexer-K pool page, in compressed slots: the DeepGEMM indexer reads
 # K in blocks of at most 128 and sglang's JIT metadata builder asserts 64.
 def dsv41_index_page_size() -> int:
+    from sglang.srt.utils import is_tpu
+
+    if is_tpu():
+        # The TPU packed-FP8 scorer is native at 128 records per page; smaller
+        # pages take its slower repeat/lane-gather path. The TPU pool requires
+        # page_size 256, so a C2 FULL page holds 128 slots: pages must divide it.
+        size = envs.SGLANG_TPU_DSV41_INDEX_PAGE_SIZE.get()
+        if size < 1 or size & (size - 1) or 128 % size:
+            raise ValueError(
+                f"SGLANG_TPU_DSV41_INDEX_PAGE_SIZE={size} must be a power of two "
+                "dividing 128"
+            )
+        return size
+
     from sglang.srt.layers.deep_gemm_wrapper.configurer import (
         DEEPGEMM_PAGED_SPARSE_MQA_LOGITS,
     )
